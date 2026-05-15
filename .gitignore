@@ -1,2 +1,26 @@
+# --- Training artifacts (big, regeneratable) ---
+checkpoints/
+data/
+*.bin
+*.bin.tmp
+tokenizer.json
+
+# --- Slurm output logs ---
+logs/*
+!logs/.gitkeep
+
+# --- Python ---
 __pycache__/
-train.sh
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# --- Editor / OS ---
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# --- HuggingFace cache (if it ends up in the project dir) ---
+.cache/
