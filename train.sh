@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --partition=dgxh100
+#SBATCH --partition=dgx
 #SBATCH --gpus=1
 #SBATCH --cpus-per-gpu=16
 #SBATCH --time=24:00:00

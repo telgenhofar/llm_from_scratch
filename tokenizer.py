@@ -3,6 +3,7 @@ import regex as re
 import heapq
 import collections
 from pathlib import Path
+from datasets import load_dataset
 
 # GPT-4's pre-tokenization pattern (from tiktoken's cl100k_base)
 # Splits text into chunks before BPE runs, so merges never cross these boundaries
@@ -26,35 +27,68 @@ class Tokenizer:
         assert vocab_size >= 256
         num_merges = vocab_size - 256
 
-        # Pre-tokenize: split text into chunks, then convert each to a list of byte ids
         chunks = re.findall(self._compiled_pattern, text)
-        ids: list[list[int]] = [list(chunk.encode("utf-8")) for chunk in chunks]
+        chunks_ids: list[list[int]] = [list(c.encode("utf-8")) for c in chunks if c]
+
+        pair_counts: collections.Counter = collections.Counter()
+        pair_to_chunks: dict[tuple[int, int], set[int]] = collections.defaultdict(set)
+        for ci, ids in enumerate(chunks_ids):
+            for a, b in zip(ids, ids[1:]):
+                pair_counts[(a, b)] += 1
+                pair_to_chunks[(a, b)].add(ci)
 
         merges: dict[tuple[int, int], int] = {}
         vocab: dict[int, bytes] = {i: bytes([i]) for i in range(256)}
 
         for i in range(num_merges):
-            # Count pair frequencies across all chunks
-            counts: collections.Counter = collections.Counter()
-            for chunk_ids in ids:
-                for pair in zip(chunk_ids, chunk_ids[1:]):
-                    counts[pair] += 1
-
-            if not counts:
+            if not pair_counts:
+                break
+            best_pair, best_count = pair_counts.most_common(1)[0]
+            if best_count < 1:
                 break
 
-            best_pair = counts.most_common(1)[0][0]
             new_id = 256 + i
-
-            ids = [self._merge_chunk(chunk, best_pair, new_id) for chunk in ids]
-
             merges[best_pair] = new_id
             vocab[new_id] = vocab[best_pair[0]] + vocab[best_pair[1]]
 
-            if verbose:
+            affected = list(pair_to_chunks[best_pair])
+            a, b = best_pair
+            for ci in affected:
+                ids = chunks_ids[ci]
+                new_ids: list[int] = []
+                j = 0
+                while j < len(ids):
+                    if j < len(ids) - 1 and ids[j] == a and ids[j+1] == b:
+                        if new_ids:
+                            left = new_ids[-1]
+                            pair_counts[(left, a)] -= 1
+                            if pair_counts[(left, a)] <= 0:
+                                del pair_counts[(left, a)]
+                            pair_to_chunks[(left, a)].discard(ci)
+                            pair_counts[(left, new_id)] += 1
+                            pair_to_chunks[(left, new_id)].add(ci)
+                        if j + 2 < len(ids):
+                            right = ids[j+2]
+                            pair_counts[(b, right)] -= 1
+                            if pair_counts[(b, right)] <= 0:
+                                del pair_counts[(b, right)]
+                            pair_to_chunks[(b, right)].discard(ci)
+                            pair_counts[(new_id, right)] += 1
+                            pair_to_chunks[(new_id, right)].add(ci)
+                        new_ids.append(new_id)
+                        j += 2
+                    else:
+                        new_ids.append(ids[j])
+                        j += 1
+                chunks_ids[ci] = new_ids
+
+            del pair_counts[best_pair]
+            del pair_to_chunks[best_pair]
+
+            if verbose and (i < 10 or (i + 1) % 100 == 0):
                 print(f"merge {i+1}/{num_merges}: {best_pair} -> {new_id} "
-                      f"({vocab[new_id]!r}) had {counts[best_pair]} occurrences")
-            
+                      f"({vocab[new_id]!r}) had {best_count} occurrences")
+
         self.merges = merges
         self.vocab = vocab
         self._encode_cache.clear()
@@ -119,8 +153,8 @@ class Tokenizer:
         n = len(ids)
         tokens = list(ids)
         prev = list(range(-1, n-1))
-        next = list(range(1, n+1))
-        next[-1] = -1
+        nxt = list(range(1, n+1))
+        nxt[-1] = -1
         alive = [True] * n
 
         # Heap entries: (merge_rank, position_left). Position points to the left half of a pair
@@ -134,7 +168,7 @@ class Tokenizer:
             rank, i = heapq.heappop(heap)
             if not alive[i]:
                 continue
-            j = next[i]
+            j = nxt[i]
             if j == -1 or not alive[j]:
                 continue
             pair = (tokens[i], tokens[j])
@@ -144,8 +178,8 @@ class Tokenizer:
             new_id = self.merges[pair]
             tokens[i] = new_id
             alive[j] = False
-            new_next = next[j]
-            next[i] = new_next
+            new_next = nxt[j]
+            nxt[i] = new_next
             if new_next != -1:
                 prev[new_next] = i
 
@@ -154,7 +188,7 @@ class Tokenizer:
                 left_pair = (tokens[left], tokens[i])
                 if left_pair in self.merges:
                     heapq.heappush(heap, (self.merges[left_pair], left))
-            right = next[i]
+            right = nxt[i]
             if right != -1:
                 right_pair = (tokens[i], tokens[right])
                 if right_pair in self.merges:
@@ -166,7 +200,7 @@ class Tokenizer:
         while i != -1 and i < n:
             if alive[i]:
                 result.append(tokens[i])
-            i = next[i]
+            i = nxt[i]
         return result
 
     def decode(self, ids: list[int]) -> str:
@@ -202,3 +236,59 @@ class Tokenizer:
         tok.vocab = {int(k): bytes(v) for k, v in data["vocab"].items()}
         tok.special_tokens = data["special_tokens"]
         return tok
+
+    def train_from_dataset(
+        self,
+        dataset_name: str,
+        vocab_size: int,
+        subset: str | None = None,
+        split: str = "train",
+        text_field: str = "text",
+        sample_size: int | None = None,
+        max_chars: int | None = None,
+        streaming: bool = False,
+        verbose: bool = False,
+    ) -> None:
+        """Train the tokenizer on a HuggingFace dataset.
+
+        Args:
+            dataset_name: HF dataset id (e.g. "roneneldan/TinyStories").
+            vocab_size: target vocabulary size.
+            subset: optional config name for the dataset (e.g. "sample-10BT").
+            split: dataset split to use.
+            text_field: name of the text column in the dataset.
+            sample_size: max number of documents to use. None = all (non-streaming only).
+            max_chars: stop collecting text after this many characters. Useful
+                with streaming. None = no limit.
+            streaming: stream the dataset instead of downloading fully.
+            verbose: forwarded to train().
+        """
+        print(f"loading {dataset_name}" + (f" (subset: {subset})" if subset else ""))
+        ds = load_dataset(dataset_name, name=subset, split=split, streaming=streaming)
+
+        chunks: list[str] = []
+        total_chars = 0
+        n_docs = 0
+
+        if streaming:
+            iterator = ds
+        else:
+            n_available = len(ds)
+            limit = min(sample_size, n_available) if sample_size else n_available
+            iterator = (ds[i] for i in range(limit))
+
+        for doc in iterator:
+            text = doc[text_field]
+            chunks.append(text)
+            total_chars += len(text)
+            n_docs += 1
+            if sample_size is not None and n_docs >= sample_size:
+                break
+            if max_chars is not None and total_chars >= max_chars:
+                break
+
+        text = "\n".join(chunks)
+        print(f"training tokenizer on {total_chars/1e6:.1f}MB of text "
+              f"from {n_docs:,} documents")
+
+        self.train(text, vocab_size=vocab_size, verbose=verbose)
