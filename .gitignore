@@ -1,6 +1,7 @@
 # --- Training artifacts (big, regeneratable) ---
 checkpoints/
 data/
+!configs/data/
 *.bin
 *.bin.tmp
 tokenizer.json

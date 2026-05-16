@@ -1,0 +1,21 @@
+# ~500M params trained on 100B tokens of FineWeb-Edu.
+
+base: base.yaml
+
+model:
+  vocab_size: 8192
+  context_length: 1024
+  d_model: 1024
+  n_heads: 16
+  n_layers: 16
+
+train:
+  data_path: data/fineweb_edu_100b/train.bin
+  val_data_path: data/fineweb_edu_100b/val.bin
+  batch_size: 12
+  grad_accum_steps: 4
+  learning_rate: 2.5e-4
+  max_steps: 400000
+  warmup_steps: 2000
+  eval_interval: 2000
+  checkpoint_interval: 2000

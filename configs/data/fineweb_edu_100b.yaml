@@ -1,0 +1,8 @@
+dataset: HuggingFaceFW/fineweb-edu
+subset: sample-100BT
+text_field: text
+split: train
+streaming: true
+out_dir: data/fineweb_edu_100b
+val_fraction: 0.001
+max_tokens: 100000000000

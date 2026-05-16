@@ -1,0 +1,6 @@
+dataset: roneneldan/TinyStories
+text_field: text
+split: train
+streaming: false
+out_dir: data/tinystories
+val_fraction: 0.005
